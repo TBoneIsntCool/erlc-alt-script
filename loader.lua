@@ -4,8 +4,8 @@
 local HttpService = game:GetService("HttpService")
 
 -- Configuration - CHANGE THESE TO YOUR GITHUB DETAILS
-local GITHUB_USERNAME = "YOUR_USERNAME"  -- Replace with your GitHub username
-local REPO_NAME = "YOUR_REPO"           -- Replace with your repository name
+local GITHUB_USERNAME = "TBoneIsntCool" -- Replace with your GitHub username
+local REPO_NAME = "erlc-alt-script"     -- Replace with your repository name
 local BRANCH = "main"                   -- Usually "main" or "master"
 
 -- Construct the GitHub raw URL
