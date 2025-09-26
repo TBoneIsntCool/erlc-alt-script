@@ -1,7 +1,5 @@
--- ERLC Alt Account Manager - GitHub Loader
+-- ERLC Alt Account Manager - GitHub Loader (Exploit Version)
 -- Replace YOUR_USERNAME and YOUR_REPO with your actual GitHub details
-
-local HttpService = game:GetService("HttpService")
 
 -- Configuration - CHANGE THESE TO YOUR GITHUB DETAILS
 local GITHUB_USERNAME = "TBoneIsntCool" -- Replace with your GitHub username
@@ -26,7 +24,7 @@ local function loadScript()
     log("URL: " .. SCRIPT_URL)
     
     local success, response = pcall(function()
-        return HttpService:RequestAsync({
+        return request({
             Url = SCRIPT_URL,
             Method = "GET"
         })
