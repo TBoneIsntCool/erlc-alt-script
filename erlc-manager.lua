@@ -71,15 +71,18 @@ local function jsonDecode(jsonStr)
     return nil
 end
 
-local function makeRequest(endpoint, method, data)
+local function makeRequest(endpoint, method, data, retries)
     method = method or "GET"
+    retries = retries or 3
     local url = API_BASE_URL .. endpoint
     
     local requestData = {
         Url = url,
         Method = method,
         Headers = {
-            ["Content-Type"] = "application/json"
+            ["Content-Type"] = "application/json",
+            ["User-Agent"] = "ERLC-Manager/1.0",
+            ["Accept"] = "application/json"
         }
     }
     
@@ -87,27 +90,61 @@ local function makeRequest(endpoint, method, data)
         requestData.Body = jsonEncode(data)
     end
     
-    local success, response = pcall(function()
-        return request(requestData)
-    end)
-    
-    if not success then
-        log("Request failed: " .. tostring(response))
-        return nil
-    end
-    
-    if response.Success then
-        local jsonData = jsonDecode(response.Body)
-        if jsonData then
-            return jsonData
+    for attempt = 1, retries do
+        local success, response = pcall(function()
+            return request(requestData)
+        end)
+        
+        if not success then
+            log("Request attempt " .. attempt .. " failed: " .. tostring(response))
+            if attempt < retries then
+                log("Retrying in " .. (attempt * 2) .. " seconds...")
+                wait(attempt * 2) -- Exponential backoff
+            end
         else
-            log("Failed to decode JSON response")
-            return nil
+            if response.Success then
+                local jsonData = jsonDecode(response.Body)
+                if jsonData then
+                    return jsonData
+                else
+                    log("Failed to decode JSON response. Body: " .. tostring(response.Body))
+                    return nil
+                end
+            else
+                local statusCode = response.StatusCode or "Unknown"
+                local statusMessage = response.StatusMessage or "No message"
+                
+                log("HTTP request failed - Status: " .. tostring(statusCode) .. " Message: " .. tostring(statusMessage))
+                log("URL: " .. url)
+                log("Method: " .. method)
+                
+                -- Handle specific error codes
+                if statusCode == 521 then
+                    log("Server is down (521). Retrying with longer delay...")
+                    if attempt < retries then
+                        wait(10) -- Longer wait for server issues
+                    end
+                elseif statusCode == 429 then
+                    log("Rate limited (429). Waiting before retry...")
+                    if attempt < retries then
+                        wait(30) -- Rate limit delay
+                    end
+                elseif statusCode >= 500 then
+                    log("Server error (" .. statusCode .. "). Retrying...")
+                    if attempt < retries then
+                        wait(5)
+                    end
+                else
+                    -- Client errors (4xx) - don't retry
+                    log("Client error (" .. statusCode .. "). Not retrying.")
+                    return nil
+                end
+            end
         end
-    else
-        log("HTTP request failed with status: " .. tostring(response.StatusCode))
-        return nil
     end
+    
+    log("All retry attempts failed for " .. endpoint)
+    return nil
 end
 
 -- Core functions
@@ -118,7 +155,7 @@ local function sendHeartbeat()
         current_server = currentState.current_server
     }
     
-    local response = makeRequest("/heartbeat", "POST", data)
+    local response = makeRequest("/heartbeat", "POST", data, 2) -- Only 2 retries for heartbeats
     if response then
         log("Heartbeat sent - Status: " .. currentState.status)
         
@@ -129,7 +166,7 @@ local function sendHeartbeat()
         
         return true
     else
-        log("Failed to send heartbeat")
+        log("Failed to send heartbeat after retries")
         return false
     end
 end
@@ -139,7 +176,7 @@ local function checkForJob()
         account_id = ACCOUNT_ID
     }
     
-    local response = makeRequest("/get_job", "POST", data)
+    local response = makeRequest("/get_job", "POST", data, 1) -- Single attempt for job checks
     if response then
         if response.action == "join" then
             log("Received join command for: " .. response.join_code)
@@ -161,12 +198,12 @@ local function confirmJoin(sessionId, serverId)
         server_id = serverId or "unknown"
     }
     
-    local response = makeRequest("/confirm_join", "POST", data)
+    local response = makeRequest("/confirm_join", "POST", data, 3) -- Important, so 3 retries
     if response and response.status == "confirmed" then
         log("Join confirmed")
         return true
     else
-        log("Failed to confirm join")
+        log("Failed to confirm join after retries")
         return false
     end
 end
@@ -223,7 +260,7 @@ local function handleDisconnect()
     log("Disconnected and returned to available status")
 end
 
--- Main loop
+-- Main loop with better error handling
 local function startManager()
     log("ERLC Alt Account Manager started")
     log("Account ID: " .. ACCOUNT_ID)
@@ -231,6 +268,23 @@ local function startManager()
     
     local lastHeartbeat = 0
     local lastJobCheck = 0
+    local consecutiveFailures = 0
+    local maxFailures = 5
+    
+    -- Test initial connection
+    log("Testing initial connection...")
+    local testResponse = makeRequest("/heartbeat", "POST", {
+        account_id = ACCOUNT_ID,
+        status = "starting",
+        current_server = nil
+    }, 1)
+    
+    if not testResponse then
+        log("WARNING: Initial connection test failed. API may be down.")
+        log("Continuing anyway - will retry connections...")
+    else
+        log("Initial connection successful!")
+    end
     
     -- Main heartbeat loop
     local heartbeatConnection
@@ -243,14 +297,29 @@ local function startManager()
             return
         end
         
+        -- Circuit breaker pattern
+        if consecutiveFailures >= maxFailures then
+            log("Too many consecutive failures (" .. consecutiveFailures .. "). Backing off for 60 seconds...")
+            wait(60)
+            consecutiveFailures = 0 -- Reset after backoff
+            return
+        end
+        
         -- Send heartbeat every HEARTBEAT_INTERVAL seconds
         if currentTime - lastHeartbeat >= HEARTBEAT_INTERVAL then
-            sendHeartbeat()
+            local success = sendHeartbeat()
+            if success then
+                consecutiveFailures = 0 -- Reset on success
+            else
+                consecutiveFailures = consecutiveFailures + 1
+                log("Consecutive failures: " .. consecutiveFailures)
+            end
             lastHeartbeat = currentTime
         end
         
-        -- Check for jobs when available
-        if currentState.status == "available" and currentTime - lastJobCheck >= 5 then
+        -- Check for jobs when available (less frequent if errors)
+        local jobCheckInterval = consecutiveFailures > 0 and 15 or 5
+        if currentState.status == "available" and currentTime - lastJobCheck >= jobCheckInterval then
             local job = checkForJob()
             if job and job.action == "join" then
                 currentState.current_session = job.session_id
@@ -261,6 +330,7 @@ local function startManager()
                         currentState.status = "in_server"
                         currentState.current_server = job.join_code
                         log("Successfully joined and confirmed: " .. job.join_code)
+                        consecutiveFailures = 0 -- Reset on successful operation
                     end
                 end
             end
@@ -273,7 +343,7 @@ local function startManager()
     playerLeavingConnection = Players.PlayerRemoving:Connect(function(player)
         if player == Players.LocalPlayer then
             currentState.status = "offline"
-            sendHeartbeat()
+            sendHeartbeat() -- Final heartbeat
             if heartbeatConnection then heartbeatConnection:Disconnect() end
             if playerLeavingConnection then playerLeavingConnection:Disconnect() end
         end
