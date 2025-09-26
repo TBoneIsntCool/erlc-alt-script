@@ -1,10 +1,12 @@
--- ERLC Alt Account Manager Script
+-- ERLC Alt Account Manager Script (Exploit Version)
 -- This manages joining ERLC servers via API commands
 
 local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local RunService = game:GetService("RunService")
+
+-- Try to get HttpService for JSON functions, fallback if not available
+local HttpService = pcall(function() return game:GetService("HttpService") end) and game:GetService("HttpService") or nil
 
 -- Configuration - UPDATE THIS WITH YOUR DOMAIN
 local API_BASE_URL = "https://api.tboner.cc/altaccount"
@@ -29,6 +31,46 @@ local function log(message)
     warn("[ERLC Manager] " .. message)
 end
 
+-- JSON encoding/decoding functions for exploit environment
+local function jsonEncode(data)
+    if HttpService then
+        return HttpService:JSONEncode(data)
+    end
+    
+    -- Fallback simple JSON encoder
+    if type(data) == "table" then
+        local result = "{"
+        local first = true
+        for k, v in pairs(data) do
+            if not first then
+                result = result .. ","
+            end
+            result = result .. '"' .. tostring(k) .. '":' .. jsonEncode(v)
+            first = false
+        end
+        result = result .. "}"
+        return result
+    elseif type(data) == "string" then
+        return '"' .. data .. '"'
+    else
+        return tostring(data)
+    end
+end
+
+local function jsonDecode(jsonStr)
+    if HttpService then
+        local success, result = pcall(function()
+            return HttpService:JSONDecode(jsonStr)
+        end)
+        if success then
+            return result
+        end
+    end
+    
+    -- Fallback basic parser for simple objects
+    return nil
+end
+
 local function makeRequest(endpoint, method, data)
     method = method or "GET"
     local url = API_BASE_URL .. endpoint
@@ -42,11 +84,11 @@ local function makeRequest(endpoint, method, data)
     }
     
     if data then
-        requestData.Body = HttpService:JSONEncode(data)
+        requestData.Body = jsonEncode(data)
     end
     
     local success, response = pcall(function()
-        return HttpService:RequestAsync(requestData)
+        return request(requestData)
     end)
     
     if not success then
@@ -55,10 +97,8 @@ local function makeRequest(endpoint, method, data)
     end
     
     if response.Success then
-        local jsonSuccess, jsonData = pcall(function()
-            return HttpService:JSONDecode(response.Body)
-        end)
-        if jsonSuccess then
+        local jsonData = jsonDecode(response.Body)
+        if jsonData then
             return jsonData
         else
             log("Failed to decode JSON response")
